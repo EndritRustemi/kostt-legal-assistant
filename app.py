@@ -154,30 +154,35 @@ with st.sidebar:
         sel_label  = st.selectbox("Kategoria", cat_labels, label_visibility="collapsed")
         sel_key    = cat_keys[cat_labels.index(sel_label)]
 
-        if uploaded and st.button("Ngarko", type="primary", use_container_width=True):
-            dest = LAWS_DIR / sel_key
-            dest.mkdir(parents=True, exist_ok=True)
-            hf_token   = _secret("HF_TOKEN")
-            hf_dataset = _secret("HF_DATASET_ID")
-            for f in uploaded:
-                file_path  = dest / f.name
-                file_bytes = f.read()
-                file_path.write_bytes(file_bytes)
-                if hf_token and hf_dataset:
+        if uploaded:
+            if st.button("Ngarko", type="primary", use_container_width=True):
+                dest = LAWS_DIR / sel_key
+                dest.mkdir(parents=True, exist_ok=True)
+                hf_token   = _secret("HF_TOKEN")
+                hf_dataset = _secret("HF_DATASET_ID")
+                errors = []
+                for f in uploaded:
                     try:
-                        from huggingface_hub import HfApi
-                        HfApi().upload_file(
-                            path_or_fileobj=file_bytes,
-                            path_in_repo=f"data/laws/{sel_key}/{f.name}",
-                            repo_id=hf_dataset,
-                            repo_type="dataset",
-                            token=hf_token,
-                        )
-                    except Exception:
-                        pass
-            st.cache_resource.clear()
-            st.success(f"✅ {len(uploaded)} dok. u ngarkuan dhe u ruajtën.")
-            st.rerun()
+                        file_bytes = f.read()
+                        file_path  = dest / f.name
+                        file_path.write_bytes(file_bytes)
+                        if hf_token and hf_dataset:
+                            from huggingface_hub import HfApi
+                            HfApi().upload_file(
+                                path_or_fileobj=file_bytes,
+                                path_in_repo=f"data/laws/{sel_key}/{f.name}",
+                                repo_id=hf_dataset,
+                                repo_type="dataset",
+                                token=hf_token,
+                            )
+                    except Exception as e:
+                        errors.append(f"{f.name}: {e}")
+                st.cache_resource.clear()
+                if errors:
+                    st.error("Gabime:\n" + "\n".join(errors))
+                else:
+                    st.success(f"✅ {len(uploaded)} dok. u ngarkuan dhe u ruajtën.")
+                st.rerun()
 
     with st.expander("📋 Lista e dokumenteve"):
         for cat_key, cat_label in CATEGORIES.items():

@@ -160,29 +160,41 @@ with st.sidebar:
                 dest.mkdir(parents=True, exist_ok=True)
                 hf_token   = _secret("HF_TOKEN")
                 hf_dataset = _secret("HF_DATASET_ID")
-                errors = []
+                saved, hf_errors = [], []
+
                 for f in uploaded:
                     try:
                         file_bytes = f.read()
-                        file_path  = dest / f.name
-                        file_path.write_bytes(file_bytes)
-                        if hf_token and hf_dataset:
+                        (dest / f.name).write_bytes(file_bytes)
+                        saved.append((f.name, file_bytes))
+                    except Exception as e:
+                        hf_errors.append(f"Shkrim '{f.name}': {e}")
+
+                for fname, fbytes in saved:
+                    if hf_token and hf_dataset:
+                        try:
                             from huggingface_hub import HfApi
                             HfApi().upload_file(
-                                path_or_fileobj=file_bytes,
-                                path_in_repo=f"data/laws/{sel_key}/{f.name}",
+                                path_or_fileobj=fbytes,
+                                path_in_repo=f"data/laws/{sel_key}/{fname}",
                                 repo_id=hf_dataset,
                                 repo_type="dataset",
                                 token=hf_token,
                             )
-                    except Exception as e:
-                        errors.append(f"{f.name}: {e}")
-                st.cache_resource.clear()
-                if errors:
-                    st.error("Gabime:\n" + "\n".join(errors))
+                        except Exception as e:
+                            hf_errors.append(f"HF ruajtje '{fname}': {e}")
+
+                if hf_errors:
+                    st.session_state["_upload_err"] = "\n".join(hf_errors)
                 else:
-                    st.success(f"✅ {len(uploaded)} dok. u ngarkuan dhe u ruajtën.")
+                    st.session_state["_upload_ok"] = len(saved)
+                st.cache_resource.clear()
                 st.rerun()
+
+        if "_upload_ok" in st.session_state:
+            st.success(f"✅ {st.session_state.pop('_upload_ok')} dok. u ngarkuan.")
+        if "_upload_err" in st.session_state:
+            st.error(st.session_state.pop("_upload_err"))
 
     with st.expander("📋 Lista e dokumenteve"):
         for cat_key, cat_label in CATEGORIES.items():

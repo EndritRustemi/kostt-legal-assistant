@@ -1,9 +1,10 @@
 """
-KOSTT Legal Assistant — RAG System
+Energy Law & Legal AI by ENDRIT — RAG System
 """
 
 import streamlit as st
 from pathlib import Path
+from urllib.parse import quote
 
 from rag.ingest import build_index, count_pdfs, CATEGORIES
 from rag.retriever import retrieve
@@ -42,6 +43,40 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+
+# ── STARTUP: sync PDFs from HF Space repo ─────────────────────────────────────
+
+@st.cache_resource(show_spinner="Duke ngarkuar dokumentet...")
+def _sync_pdfs():
+    """At container startup, download any PDFs stored in the HF Space repo."""
+    try:
+        hf_token = st.secrets.get("HF_TOKEN", "")
+        hf_repo  = st.secrets.get("HF_REPO_ID", "")
+    except Exception:
+        return
+    if not (hf_token and hf_repo):
+        return
+    try:
+        from huggingface_hub import HfApi
+        import requests as _req
+        api = HfApi()
+        app_dir = Path(__file__).parent
+        for rfile in api.list_repo_files(repo_id=hf_repo, repo_type="space", token=hf_token):
+            if not (rfile.startswith("data/laws/") and rfile.endswith(".pdf")):
+                continue
+            local = app_dir / rfile
+            if local.exists():
+                continue
+            local.parent.mkdir(parents=True, exist_ok=True)
+            encoded = "/".join(quote(part, safe="") for part in rfile.split("/"))
+            url = f"https://huggingface.co/spaces/{hf_repo}/resolve/main/{encoded}"
+            r = _req.get(url, headers={"Authorization": f"Bearer {hf_token}"}, timeout=120)
+            r.raise_for_status()
+            local.write_bytes(r.content)
+    except Exception:
+        pass
+
+_sync_pdfs()
 
 # ── HELPERS ───────────────────────────────────────────────────────────────────
 

@@ -193,7 +193,7 @@ if not st.session_state.messages:
     <div style='text-align:center; padding: 80px 0 40px 0; color: #888;'>
         <div style='font-size:2.5rem'>⚖️</div>
         <div style='font-size:1.3rem; font-weight:600; color:#1a3a5c; margin:10px 0'>Energy Law & Legal AI by ENDRIT</div>
-        <div style='font-size:0.9rem'>Pyetje juridike bazuar në ligjet e energjisë<br>Kosovë · ZRRE · ENTSO-E · EU</div>
+        <div style='font-size:0.9rem'>AI for Energy Law & Regulatory Insight<br>Built on Kosovo & EU Energy Regulatory Standards</div>
     </div>
     """, unsafe_allow_html=True)
 

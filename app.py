@@ -48,20 +48,20 @@ st.markdown("""
 
 @st.cache_resource(show_spinner="Duke ngarkuar dokumentet...")
 def _sync_pdfs():
-    """At container startup, download any PDFs stored in the HF Space repo."""
+    """At container startup, download PDFs from the persistent HF Dataset repo."""
     try:
-        hf_token = st.secrets.get("HF_TOKEN", "")
-        hf_repo  = st.secrets.get("HF_REPO_ID", "")
+        hf_token   = st.secrets.get("HF_TOKEN", "")
+        hf_dataset = st.secrets.get("HF_DATASET_ID", "")
     except Exception:
         return
-    if not (hf_token and hf_repo):
+    if not (hf_token and hf_dataset):
         return
     try:
         from huggingface_hub import HfApi
         import requests as _req
         api = HfApi()
         app_dir = Path(__file__).parent
-        for rfile in api.list_repo_files(repo_id=hf_repo, repo_type="space", token=hf_token):
+        for rfile in api.list_repo_files(repo_id=hf_dataset, repo_type="dataset", token=hf_token):
             if not (rfile.startswith("data/laws/") and rfile.endswith(".pdf")):
                 continue
             local = app_dir / rfile
@@ -69,7 +69,7 @@ def _sync_pdfs():
                 continue
             local.parent.mkdir(parents=True, exist_ok=True)
             encoded = "/".join(quote(part, safe="") for part in rfile.split("/"))
-            url = f"https://huggingface.co/spaces/{hf_repo}/resolve/main/{encoded}"
+            url = f"https://huggingface.co/datasets/{hf_dataset}/resolve/main/{encoded}"
             r = _req.get(url, headers={"Authorization": f"Bearer {hf_token}"}, timeout=120)
             r.raise_for_status()
             local.write_bytes(r.content)
@@ -132,21 +132,21 @@ with st.sidebar:
         if uploaded and st.button("Ngarko", type="primary", use_container_width=True):
             dest = LAWS_DIR / sel_key
             dest.mkdir(parents=True, exist_ok=True)
-            hf_token = st.secrets.get("HF_TOKEN", "")
-            hf_repo  = st.secrets.get("HF_REPO_ID", "")
+            hf_token   = st.secrets.get("HF_TOKEN", "")
+            hf_dataset = st.secrets.get("HF_DATASET_ID", "")
             for f in uploaded:
                 file_path = dest / f.name
                 file_bytes = f.read()
                 file_path.write_bytes(file_bytes)
-                # Ruaj edhe në HF Space repo për qëndrueshmëri
-                if hf_token and hf_repo:
+                # Ruaj në dataset repo për qëndrueshmëri ndërmjet restartimeve
+                if hf_token and hf_dataset:
                     try:
                         from huggingface_hub import HfApi
                         HfApi().upload_file(
                             path_or_fileobj=file_bytes,
                             path_in_repo=f"data/laws/{sel_key}/{f.name}",
-                            repo_id=hf_repo,
-                            repo_type="space",
+                            repo_id=hf_dataset,
+                            repo_type="dataset",
                             token=hf_token,
                         )
                     except Exception:

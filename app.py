@@ -39,19 +39,45 @@ st.markdown("""
         font-size: 0.72rem;
         font-weight: 600;
     }
-    /* Fshih header-in e Streamlit */
     #MainMenu, header, footer { visibility: hidden; }
+    /* edit button — visible only on hover */
+    .edit-btn button {
+        padding: 0 6px !important;
+        height: 28px !important;
+        min-height: 28px !important;
+        font-size: 0.75rem !important;
+        opacity: 0.3;
+        transition: opacity 0.2s;
+    }
+    .edit-btn button:hover { opacity: 1 !important; }
 </style>
 """, unsafe_allow_html=True)
+
+
+# ── HELPERS ───────────────────────────────────────────────────────────────────
+
+def _secret(key: str) -> str:
+    """Read secret: env var first (HF Spaces Docker), then st.secrets (local)."""
+    val = os.environ.get(key, "")
+    if val:
+        return val
+    try:
+        return st.secrets.get(key, "")
+    except Exception:
+        return ""
+
+
+def get_api_key() -> str:
+    api = _secret("GEMINI_API_KEY")
+    return api or st.session_state.get("api_key", "")
 
 
 # ── STARTUP: sync PDFs from HF Dataset repo ───────────────────────────────────
 
 @st.cache_resource(show_spinner="Duke ngarkuar dokumentet...")
 def _sync_pdfs() -> str:
-    """Download PDFs from the persistent HF Dataset repo at container startup."""
-    hf_token   = os.environ.get("HF_TOKEN", "") or st.secrets.get("HF_TOKEN", "")
-    hf_dataset = os.environ.get("HF_DATASET_ID", "") or st.secrets.get("HF_DATASET_ID", "")
+    hf_token   = _secret("HF_TOKEN")
+    hf_dataset = _secret("HF_DATASET_ID")
 
     if not hf_token:
         return "MISSING:HF_TOKEN"
@@ -82,14 +108,6 @@ def _sync_pdfs() -> str:
 
 _SYNC_STATUS = _sync_pdfs()
 
-# ── HELPERS ───────────────────────────────────────────────────────────────────
-
-def get_api_key() -> str:
-    try:
-        return st.secrets["GEMINI_API_KEY"]
-    except Exception:
-        return st.session_state.get("api_key", "")
-
 
 @st.cache_resource(show_spinner="Duke indeksuar dokumentet (vetëm herën e parë)...")
 def load_index():
@@ -102,7 +120,6 @@ with st.sidebar:
     st.markdown("## ⚖️ Energy Law & Legal AI")
     st.markdown("---")
 
-    # API Key
     api_key = get_api_key()
     if not api_key:
         entered = st.text_input("🔑 Gemini API Key", type="password")
@@ -114,22 +131,20 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # Statistikat
     st.markdown("### 📂 Dokumentet")
     if _SYNC_STATUS.startswith("ERR") or _SYNC_STATUS.startswith("MISSING"):
         st.warning(f"⚠️ Sync: {_SYNC_STATUS}")
     counts = count_pdfs(LAWS_DIR)
-    total = sum(counts.values())
+    total  = sum(counts.values())
     for cat, n in counts.items():
         st.markdown(f"{'✅' if n > 0 else '⬜'} **{cat}**: {n} dok.")
     st.markdown(f"**Gjithsej: {total}**")
 
     st.markdown("---")
 
-    # Ngarko dokument
     with st.expander("📥 Ngarko dokument"):
-        uploaded = st.file_uploader("PDF", type="pdf", accept_multiple_files=True,
-                                    label_visibility="collapsed")
+        uploaded  = st.file_uploader("PDF", type="pdf", accept_multiple_files=True,
+                                     label_visibility="collapsed")
         cat_labels = list(CATEGORIES.values())
         cat_keys   = list(CATEGORIES.keys())
         sel_label  = st.selectbox("Kategoria", cat_labels, label_visibility="collapsed")
@@ -138,13 +153,12 @@ with st.sidebar:
         if uploaded and st.button("Ngarko", type="primary", use_container_width=True):
             dest = LAWS_DIR / sel_key
             dest.mkdir(parents=True, exist_ok=True)
-            hf_token   = st.secrets.get("HF_TOKEN", "")
-            hf_dataset = st.secrets.get("HF_DATASET_ID", "")
+            hf_token   = _secret("HF_TOKEN")
+            hf_dataset = _secret("HF_DATASET_ID")
             for f in uploaded:
-                file_path = dest / f.name
+                file_path  = dest / f.name
                 file_bytes = f.read()
                 file_path.write_bytes(file_bytes)
-                # Ruaj në dataset repo për qëndrueshmëri ndërmjet restartimeve
                 if hf_token and hf_dataset:
                     try:
                         from huggingface_hub import HfApi
@@ -161,7 +175,6 @@ with st.sidebar:
             st.success(f"✅ {len(uploaded)} dok. u ngarkuan dhe u ruajtën.")
             st.rerun()
 
-    # Shfaq dokumentet
     with st.expander("📋 Lista e dokumenteve"):
         for cat_key, cat_label in CATEGORIES.items():
             folder = LAWS_DIR / cat_key
@@ -192,8 +205,9 @@ with st.sidebar:
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
+if "edit_idx" not in st.session_state:
+    st.session_state.edit_idx = None
 
-# Mesazhi mirëpritës kur biseda është bosh
 if not st.session_state.messages:
     st.markdown("""
     <div style='text-align:center; padding: 80px 0 40px 0; color: #888;'>
@@ -203,25 +217,70 @@ if not st.session_state.messages:
     </div>
     """, unsafe_allow_html=True)
 
-# Shfaq historikun
-for msg in st.session_state.messages:
+# ── HISTORY ───────────────────────────────────────────────────────────────────
+
+for i, msg in enumerate(st.session_state.messages):
     with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
-        if msg.get("sources"):
-            with st.expander(f"📚 Burimet ({len(msg['sources'])})"):
-                for src in msg["sources"]:
-                    st.markdown(
-                        f'<div class="source-card">'
-                        f'📄 <b>{src["doc"]}</b> · {src["category"]} · Faqja {src["page"]}'
-                        f' <span class="score-badge">{src["score"]}</span><br>'
-                        f'<i>{src["snippet"]}...</i></div>',
-                        unsafe_allow_html=True,
-                    )
+        if msg["role"] == "user":
+            col_txt, col_btn = st.columns([20, 1])
+            col_txt.markdown(msg["content"])
+            with col_btn:
+                st.markdown('<div class="edit-btn">', unsafe_allow_html=True)
+                if st.button("✏️", key=f"edit_{i}", help="Edito pyetjen"):
+                    st.session_state.edit_idx = i
+                    st.rerun()
+                st.markdown('</div>', unsafe_allow_html=True)
+        else:
+            st.markdown(msg["content"])
+            if msg.get("sources"):
+                label = ("🌐 Burimet nga Interneti"
+                         if msg.get("src_type") == "web"
+                         else f"📚 Burimet ({len(msg['sources'])})")
+                with st.expander(label):
+                    for src in msg["sources"]:
+                        if msg.get("src_type") == "web" and src.get("url"):
+                            st.markdown(
+                                f'<div class="source-card">🌐 <b>'
+                                f'<a href="{src["url"]}" target="_blank">{src["doc"]}</a></b><br>'
+                                f'<i>{src["snippet"]}...</i></div>',
+                                unsafe_allow_html=True,
+                            )
+                        else:
+                            st.markdown(
+                                f'<div class="source-card">📄 <b>{src["doc"]}</b> · '
+                                f'{src["category"]} · Faqja {src["page"]}'
+                                f' <span class="score-badge">{src["score"]}</span><br>'
+                                f'<i>{src["snippet"]}...</i></div>',
+                                unsafe_allow_html=True,
+                            )
 
-# Input — Streamlit e mban automatikisht në fund të faqes
-if question := st.chat_input("Shkruani pyetjen tuaj juridike..."):
+# ── EDIT MODE ─────────────────────────────────────────────────────────────────
+
+if st.session_state.edit_idx is not None:
+    idx      = st.session_state.edit_idx
+    original = st.session_state.messages[idx]["content"]
+    edited   = st.text_area("✏️ Edito pyetjen:", value=original,
+                             key="edit_textarea", height=80, label_visibility="collapsed")
+    c1, c2 = st.columns([3, 1])
+    if c1.button("▶ Dërgo", type="primary", use_container_width=True):
+        st.session_state.messages = st.session_state.messages[:idx]
+        st.session_state.edit_idx = None
+        st.session_state["_pending_q"] = edited
+        st.rerun()
+    if c2.button("✕ Anulo", use_container_width=True):
+        st.session_state.edit_idx = None
+        st.rerun()
+    question = None
+else:
+    question = st.chat_input("Shkruani pyetjen tuaj juridike...")
+
+# ── QUESTION HANDLING ─────────────────────────────────────────────────────────
+
+if "_pending_q" in st.session_state:
+    question = st.session_state.pop("_pending_q")
+
+if question:
     api_key = get_api_key()
-
     st.session_state.messages.append({"role": "user", "content": question})
     with st.chat_message("user"):
         st.markdown(question)
@@ -239,14 +298,16 @@ if question := st.chat_input("Shkruani pyetjen tuaj juridike..."):
                     answer, sources, src_type = generate_answer(question, chunks, api_key)
 
                     if src_type == "web":
-                        st.info("🌐 Nuk u gjet në dokumentet tuaja — po kërkohet në internet. Verifikoni me burime zyrtare.")
+                        st.info("🌐 Nuk u gjet në dokumentet tuaja — po kërkohet në internet.")
                     elif src_type == "documents":
                         st.success("📄 U gjet në dokumentet tuaja.")
 
                     st.markdown(answer)
 
                     if sources:
-                        label = "🌐 Burimet nga Interneti" if src_type == "web" else f"📚 Burimet ({len(sources)})"
+                        label = ("🌐 Burimet nga Interneti"
+                                 if src_type == "web"
+                                 else f"📚 Burimet ({len(sources)})")
                         with st.expander(label):
                             for src in sources:
                                 if src_type == "web" and src.get("url"):

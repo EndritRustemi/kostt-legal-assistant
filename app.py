@@ -204,7 +204,7 @@ with st.sidebar:
                 for pdf in pdfs:
                     c1, c2 = st.columns([5, 1])
                     c1.caption(pdf.name)
-                    if c2.button("🗑️", key=f"del_{pdf.name}"):
+                    if c2.button("🗑️", key=f"del_{cat_key}_{pdf.name}"):
                         pdf.unlink()
                         st.cache_resource.clear()
                         st.rerun()

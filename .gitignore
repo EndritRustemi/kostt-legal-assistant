@@ -1,0 +1,10 @@
+.streamlit/secrets.toml
+__pycache__/
+*.pyc
+.env
+chroma_db/
+data/laws/**/*.pdf
+!data/laws/kosove/.gitkeep
+!data/laws/zrre/.gitkeep
+!data/laws/entso-e/.gitkeep
+!data/laws/eu/.gitkeep

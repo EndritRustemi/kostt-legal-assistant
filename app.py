@@ -197,17 +197,94 @@ with st.sidebar:
             st.error(st.session_state.pop("_upload_err"))
 
     with st.expander("📋 Lista e dokumenteve"):
+        def _fmt_size(path):
+            b = path.stat().st_size
+            return f"{b/1024:.0f} KB" if b < 1024*1024 else f"{b/1024/1024:.1f} MB"
+
+        def _hf_delete(cat_k, fname):
+            tok = _secret("HF_TOKEN"); ds = _secret("HF_DATASET_ID")
+            if tok and ds:
+                try:
+                    from huggingface_hub import HfApi
+                    HfApi().delete_file(
+                        path_in_repo=f"data/laws/{cat_k}/{fname}",
+                        repo_id=ds, repo_type="dataset", token=tok,
+                    )
+                except Exception:
+                    pass
+
+        def _hf_upload(cat_k, fname, fbytes):
+            tok = _secret("HF_TOKEN"); ds = _secret("HF_DATASET_ID")
+            if tok and ds:
+                try:
+                    from huggingface_hub import HfApi
+                    HfApi().upload_file(
+                        path_or_fileobj=fbytes,
+                        path_in_repo=f"data/laws/{cat_k}/{fname}",
+                        repo_id=ds, repo_type="dataset", token=tok,
+                    )
+                except Exception:
+                    pass
+
+        has_any = False
         for cat_key, cat_label in CATEGORIES.items():
             folder = LAWS_DIR / cat_key
-            if folder.exists():
-                pdfs = sorted(folder.glob("*.pdf"))
-                for pdf in pdfs:
-                    c1, c2 = st.columns([5, 1])
-                    c1.caption(pdf.name)
-                    if c2.button("🗑️", key=f"del_{cat_key}_{pdf.name}"):
+            if not folder.exists():
+                continue
+            pdfs = sorted(folder.glob("*.pdf"))
+            if not pdfs:
+                continue
+            has_any = True
+            st.markdown(f"**📁 {cat_label}** — {len(pdfs)} dok.")
+            for pdf in pdfs:
+                moving_key = f"_moving_{cat_key}_{pdf.name}"
+                if st.session_state.get(moving_key):
+                    st.markdown(f"↗️ **{pdf.stem[:32]}**")
+                    other_cats = {k: v for k, v in CATEGORIES.items() if k != cat_key}
+                    new_cat = st.selectbox(
+                        "Zhvendos në kategorinë:",
+                        list(other_cats.keys()),
+                        format_func=lambda k: CATEGORIES[k],
+                        key=f"sel_{cat_key}_{pdf.name}",
+                        label_visibility="collapsed",
+                    )
+                    mc1, mc2 = st.columns(2)
+                    if mc1.button("✓ Konfirmo", key=f"ok_mv_{cat_key}_{pdf.name}",
+                                  type="primary", use_container_width=True):
+                        fbytes = pdf.read_bytes()
+                        new_dest = LAWS_DIR / new_cat / pdf.name
+                        new_dest.parent.mkdir(parents=True, exist_ok=True)
+                        new_dest.write_bytes(fbytes)
                         pdf.unlink()
+                        _hf_upload(new_cat, pdf.name, fbytes)
+                        _hf_delete(cat_key, pdf.name)
+                        st.session_state.pop(moving_key, None)
                         st.cache_resource.clear()
                         st.rerun()
+                    if mc2.button("✕ Anulo", key=f"no_mv_{cat_key}_{pdf.name}",
+                                  use_container_width=True):
+                        st.session_state.pop(moving_key, None)
+                        st.rerun()
+                else:
+                    c1, c2, c3 = st.columns([7, 1, 1])
+                    name_short = pdf.stem[:28] + ("…" if len(pdf.stem) > 28 else "")
+                    c1.markdown(
+                        f"<span style='font-size:0.82rem'>📄 {name_short}</span>"
+                        f"<br><span style='font-size:0.72rem;color:#888'>{_fmt_size(pdf)}</span>",
+                        unsafe_allow_html=True,
+                    )
+                    if c2.button("↗️", key=f"mv_{cat_key}_{pdf.name}", help="Zhvendos"):
+                        st.session_state[moving_key] = True
+                        st.rerun()
+                    if c3.button("🗑️", key=f"del_{cat_key}_{pdf.name}", help="Fshi"):
+                        pdf.unlink()
+                        _hf_delete(cat_key, pdf.name)
+                        st.cache_resource.clear()
+                        st.rerun()
+            st.markdown("---")
+
+        if not has_any:
+            st.caption("Asnjë dokument i ngarkuar.")
 
     st.markdown("---")
     col1, col2 = st.columns(2)

@@ -40,16 +40,20 @@ st.markdown("""
         font-weight: 600;
     }
     #MainMenu, header, footer { visibility: hidden; }
-    /* edit button — visible only on hover */
-    .edit-btn button {
-        padding: 0 6px !important;
-        height: 28px !important;
-        min-height: 28px !important;
-        font-size: 0.75rem !important;
-        opacity: 0.3;
-        transition: opacity 0.2s;
+    /* edit button */
+    div[data-testid="stHorizontalBlock"] > div:has(> div[data-testid="stButton"] > button[kind="secondary"]) {
+        display: flex;
+        align-items: flex-end;
     }
-    .edit-btn button:hover { opacity: 1 !important; }
+    button.edit-msg-btn {
+        background: none !important;
+        border: none !important;
+        color: #aaa !important;
+        font-size: 0.78rem !important;
+        padding: 2px 6px !important;
+        cursor: pointer;
+    }
+    button.edit-msg-btn:hover { color: #1a5276 !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -222,14 +226,11 @@ if not st.session_state.messages:
 for i, msg in enumerate(st.session_state.messages):
     with st.chat_message(msg["role"]):
         if msg["role"] == "user":
-            col_txt, col_btn = st.columns([20, 1])
-            col_txt.markdown(msg["content"])
-            with col_btn:
-                st.markdown('<div class="edit-btn">', unsafe_allow_html=True)
-                if st.button("✏️", key=f"edit_{i}", help="Edito pyetjen"):
-                    st.session_state.edit_idx = i
-                    st.rerun()
-                st.markdown('</div>', unsafe_allow_html=True)
+            st.markdown(msg["content"])
+            if st.button("✏️ Edito", key=f"edit_{i}",
+                         help="Edito këtë pyetje"):
+                st.session_state.edit_idx = i
+                st.rerun()
         else:
             st.markdown(msg["content"])
             if msg.get("sources"):

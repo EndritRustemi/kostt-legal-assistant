@@ -2,9 +2,10 @@
 Energy Law & Legal AI by ENDRIT — RAG System
 """
 
+import os
+import shutil
 import streamlit as st
 from pathlib import Path
-from urllib.parse import quote
 
 from rag.ingest import build_index, count_pdfs, CATEGORIES
 from rag.retriever import retrieve
@@ -44,39 +45,42 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# ── STARTUP: sync PDFs from HF Space repo ─────────────────────────────────────
+# ── STARTUP: sync PDFs from HF Dataset repo ───────────────────────────────────
 
 @st.cache_resource(show_spinner="Duke ngarkuar dokumentet...")
-def _sync_pdfs():
-    """At container startup, download PDFs from the persistent HF Dataset repo."""
-    try:
-        hf_token   = st.secrets.get("HF_TOKEN", "")
-        hf_dataset = st.secrets.get("HF_DATASET_ID", "")
-    except Exception:
-        return
-    if not (hf_token and hf_dataset):
-        return
-    try:
-        from huggingface_hub import HfApi
-        import requests as _req
-        api = HfApi()
-        app_dir = Path(__file__).parent
-        for rfile in api.list_repo_files(repo_id=hf_dataset, repo_type="dataset", token=hf_token):
-            if not (rfile.startswith("data/laws/") and rfile.endswith(".pdf")):
-                continue
-            local = app_dir / rfile
-            if local.exists():
-                continue
-            local.parent.mkdir(parents=True, exist_ok=True)
-            encoded = "/".join(quote(part, safe="") for part in rfile.split("/"))
-            url = f"https://huggingface.co/datasets/{hf_dataset}/resolve/main/{encoded}"
-            r = _req.get(url, headers={"Authorization": f"Bearer {hf_token}"}, timeout=120)
-            r.raise_for_status()
-            local.write_bytes(r.content)
-    except Exception:
-        pass
+def _sync_pdfs() -> str:
+    """Download PDFs from the persistent HF Dataset repo at container startup."""
+    hf_token   = os.environ.get("HF_TOKEN", "") or st.secrets.get("HF_TOKEN", "")
+    hf_dataset = os.environ.get("HF_DATASET_ID", "") or st.secrets.get("HF_DATASET_ID", "")
 
-_sync_pdfs()
+    if not hf_token:
+        return "MISSING:HF_TOKEN"
+    if not hf_dataset:
+        return "MISSING:HF_DATASET_ID"
+
+    try:
+        from huggingface_hub import snapshot_download
+        tmp = "/tmp/hf_legal_docs"
+        snapshot_download(
+            repo_id=hf_dataset,
+            repo_type="dataset",
+            token=hf_token,
+            local_dir=tmp,
+            local_dir_use_symlinks=False,
+        )
+        app_dir = Path(__file__).parent
+        count = 0
+        for pdf in Path(tmp).rglob("*.pdf"):
+            rel  = pdf.relative_to(tmp)
+            dest = app_dir / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(pdf, dest)
+            count += 1
+        return f"OK:{count}"
+    except Exception as e:
+        return f"ERR:{e}"
+
+_SYNC_STATUS = _sync_pdfs()
 
 # ── HELPERS ───────────────────────────────────────────────────────────────────
 
@@ -112,6 +116,8 @@ with st.sidebar:
 
     # Statistikat
     st.markdown("### 📂 Dokumentet")
+    if _SYNC_STATUS.startswith("ERR") or _SYNC_STATUS.startswith("MISSING"):
+        st.warning(f"⚠️ Sync: {_SYNC_STATUS}")
     counts = count_pdfs(LAWS_DIR)
     total = sum(counts.values())
     for cat, n in counts.items():

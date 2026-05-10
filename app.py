@@ -4,14 +4,39 @@ Energy Law & Legal AI by ENDRIT — RAG System
 
 import os
 import shutil
+from datetime import datetime, timedelta, timezone
+
 import streamlit as st
 from pathlib import Path
 
-from rag.ingest import build_index, count_pdfs, CATEGORIES
+from rag.indexer import build_index, count_pdfs, CATEGORIES
 from rag.retriever import retrieve
 from rag.llm import generate_answer
+from rag.web_scraper import scrape_url, load_web_sources, save_web_sources, KNOWN_SOURCES
 
-LAWS_DIR = Path(__file__).parent / "data" / "laws"
+LAWS_DIR         = Path(__file__).parent / "data" / "laws"
+WEB_SOURCES_PATH = Path(__file__).parent / "data" / "web_sources.json"
+REFRESH_CFG_PATH = Path(__file__).parent / "data" / "refresh_cfg.txt"
+
+_REFRESH_OPTIONS = {
+    "Çdo 1 orë":   1,
+    "Çdo 3 orë":   3,
+    "Çdo 6 orë":   6,
+    "Çdo 12 orë":  12,
+    "Çdo 24 orë":  24,
+}
+
+
+def _load_refresh_hours() -> int:
+    try:
+        return int(REFRESH_CFG_PATH.read_text().strip())
+    except Exception:
+        return 6
+
+
+def _save_refresh_hours(hours: int) -> None:
+    REFRESH_CFG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    REFRESH_CFG_PATH.write_text(str(hours))
 
 st.set_page_config(
     page_title="Energy Law & Legal AI by ENDRIT",
@@ -72,7 +97,7 @@ def _secret(key: str) -> str:
 
 
 def get_api_key() -> str:
-    api = _secret("GEMINI_API_KEY")
+    api = _secret("ANTHROPIC_API_KEY")
     return api or st.session_state.get("api_key", "")
 
 
@@ -113,9 +138,25 @@ def _sync_pdfs() -> str:
 _SYNC_STATUS = _sync_pdfs()
 
 
-@st.cache_resource(show_spinner="Duke indeksuar dokumentet (vetëm herën e parë)...")
+# TTL read once at module load — stable function reference keeps Streamlit cache valid.
+# Changing the interval via the selectbox clears the cache + reruns, so the new TTL
+# is picked up on the next app start without recreating this function.
+_REFRESH_HOURS = _load_refresh_hours()
+
+
+@st.cache_resource(
+    show_spinner="Duke indeksuar dokumentet dhe burimet web...",
+    ttl=timedelta(hours=_REFRESH_HOURS),
+)
 def load_index():
-    return build_index(LAWS_DIR)
+    web_sources = load_web_sources(WEB_SOURCES_PATH)
+    web_chunks  = []
+    for src in web_sources:
+        fetched = scrape_url(src["url"], label=src["label"], category=src["category"])
+        web_chunks.extend(fetched)
+    col      = build_index(LAWS_DIR, extra_chunks=web_chunks)
+    built_at = datetime.now()
+    return col, built_at, len(web_chunks)
 
 
 # ── SIDEBAR ───────────────────────────────────────────────────────────────────
@@ -125,13 +166,22 @@ with st.sidebar:
     st.markdown("---")
 
     api_key = get_api_key()
+    if api_key and api_key.startswith("AIzaSy"):
+        # Stored key is a Google/Gemini key — clear it and force re-entry
+        st.session_state.pop("api_key", None)
+        api_key = ""
+        st.error("⚠️ Çelësi i ruajtur ishte Google/Gemini. Ju lutem vendosni çelësin Anthropic (fillon me **sk-ant-**).")
     if not api_key:
-        entered = st.text_input("🔑 Gemini API Key", type="password")
+        entered = st.text_input("🔑 Anthropic API Key", type="password",
+                                placeholder="sk-ant-...")
         if entered:
-            st.session_state["api_key"] = entered
-            st.rerun()
+            if entered.startswith("AIzaSy"):
+                st.error("❌ Ky duket si çelës Google/Gemini. Ju lutem vendosni çelësin Anthropic (fillon me **sk-ant-**).")
+            else:
+                st.session_state["api_key"] = entered
+                st.rerun()
     else:
-        st.success("✅ API Key i konfiguruar")
+        st.success("✅ API Key Anthropic i konfiguruar")
 
     st.markdown("---")
 
@@ -140,9 +190,11 @@ with st.sidebar:
         st.warning(f"⚠️ Sync: {_SYNC_STATUS}")
     counts = count_pdfs(LAWS_DIR)
     total  = sum(counts.values())
-    for cat, n in counts.items():
-        st.markdown(f"{'✅' if n > 0 else '⬜'} **{cat}**: {n} dok.")
-    st.markdown(f"**Gjithsej: {total}**")
+    for cat_key, n in counts.items():
+        cat_label = CATEGORIES.get(cat_key, cat_key)
+        icon = "✅" if n > 0 else "⬜"
+        st.markdown(f"{icon} **{cat_label}**: {n} dok.")
+    st.markdown(f"**Gjithsej: {total} dokument(e)**")
 
     st.markdown("---")
 
@@ -286,6 +338,91 @@ with st.sidebar:
         if not has_any:
             st.caption("Asnjë dokument i ngarkuar.")
 
+    # ── Web Sources ───────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("### 🌐 Burime Web")
+
+    # Show last refresh info from session state (set after a successful answer)
+    if st.session_state.get("_index_built_at"):
+        _built_at   = st.session_state["_index_built_at"]
+        _web_n      = st.session_state.get("_index_web_n", 0)
+        _hours      = _load_refresh_hours()
+        _next       = _built_at + timedelta(hours=_hours)
+        st.caption(
+            f"🕐 Rifreskuar: {_built_at.strftime('%d %b %Y, %H:%M')}"
+            f"  |  ⏳ Rifreshim tjetër: {_next.strftime('%H:%M')}"
+            f"  |  🌐 {_web_n} paraqitje web"
+        )
+
+    # Refresh interval selector — saves choice, does NOT rerun (avoids losing question)
+    _current_hours = _load_refresh_hours()
+    _current_label = next(
+        (k for k, v in _REFRESH_OPTIONS.items() if v == _current_hours), "Çdo 6 orë"
+    )
+    _sel = st.selectbox(
+        "⏱ Rifreskim automatik",
+        list(_REFRESH_OPTIONS.keys()),
+        index=list(_REFRESH_OPTIONS.keys()).index(_current_label),
+    )
+    if _REFRESH_OPTIONS[_sel] != _current_hours:
+        _save_refresh_hours(_REFRESH_OPTIONS[_sel])
+        st.cache_resource.clear()
+        st.rerun()
+
+    web_sources = load_web_sources(WEB_SOURCES_PATH)
+
+    with st.expander(f"Menaxho ({len(web_sources)} burime aktive)"):
+
+        # Quick-add from known sources
+        st.markdown("**Shto burim të njohur:**")
+        known_labels = [s["label"] for s in KNOWN_SOURCES]
+        active_urls  = {s["url"] for s in web_sources}
+
+        cols = st.columns(2)
+        for i, src in enumerate(KNOWN_SOURCES):
+            col = cols[i % 2]
+            already = src["url"] in active_urls
+            label   = f"{'✅' if already else '➕'} {src['label']}"
+            if col.button(label, key=f"ks_{i}", use_container_width=True, disabled=already):
+                web_sources.append({"url": src["url"], "label": src["label"], "category": src["category"]})
+                save_web_sources(web_sources, WEB_SOURCES_PATH)
+                st.cache_resource.clear()
+                st.rerun()
+
+        st.markdown("**Ose shto URL të personalizuar:**")
+        with st.form("add_web_src", clear_on_submit=True):
+            new_url   = st.text_input("URL", placeholder="https://www.example.com/page")
+            new_label = st.text_input("Emri", placeholder="p.sh. ZRRE – Tarifat 2024")
+            new_cat   = st.selectbox("Kategoria", ["KOSTT", "ZRRE", "KEK", "KESCO", "KEDS",
+                                                   "ENTSO-E", "Energy Community",
+                                                   "Gazeta Zyrtare", "Tjetër"])
+            if st.form_submit_button("➕ Shto", type="primary", use_container_width=True):
+                if new_url.startswith("http"):
+                    web_sources.append({"url": new_url.strip(),
+                                        "label": new_label.strip() or new_url.strip(),
+                                        "category": new_cat})
+                    save_web_sources(web_sources, WEB_SOURCES_PATH)
+                    st.cache_resource.clear()
+                    st.rerun()
+                else:
+                    st.error("URL duhet të fillojë me https://")
+
+        # List + delete active sources
+        if web_sources:
+            st.markdown("**Burimet aktive:**")
+            for i, src in enumerate(web_sources):
+                c1, c2 = st.columns([7, 1])
+                c1.markdown(
+                    f"<span style='font-size:0.82rem'>🌐 <b>{src['label']}</b>"
+                    f"<br><span style='font-size:0.72rem;color:#888'>{src['url'][:50]}{'…' if len(src['url'])>50 else ''}</span></span>",
+                    unsafe_allow_html=True,
+                )
+                if c2.button("🗑️", key=f"del_ws_{i}", help="Hiq"):
+                    web_sources.pop(i)
+                    save_web_sources(web_sources, WEB_SOURCES_PATH)
+                    st.cache_resource.clear()
+                    st.rerun()
+
     st.markdown("---")
     col1, col2 = st.columns(2)
     if col1.button("🔄 Ri-indekso", use_container_width=True):
@@ -382,16 +519,35 @@ if question:
 
     with st.chat_message("assistant"):
         if not api_key:
-            st.warning("⚠️ Vendosni API Key në sidebar.")
-        elif sum(count_pdfs(LAWS_DIR).values()) == 0:
-            st.warning("⚠️ Ngarkoni dokumente ligjore nga sidebar.")
+            msg = "⚠️ Vendosni API Key (Anthropic) në sidebar para se të vazhdoni."
+            st.warning(msg)
+            st.session_state.messages.append({"role": "assistant", "content": msg,
+                                               "sources": [], "src_type": "none"})
+        elif (sum(count_pdfs(LAWS_DIR).values()) == 0
+              and not load_web_sources(WEB_SOURCES_PATH)):
+            msg = "⚠️ Ngarkoni dokumente ligjore ose shtoni burime web nga sidebar."
+            st.warning(msg)
+            st.session_state.messages.append({"role": "assistant", "content": msg,
+                                               "sources": [], "src_type": "none"})
         else:
             with st.spinner("Duke kërkuar..."):
+                answer  = None
+                sources = []
+                src_type = "none"
                 try:
-                    index  = load_index()
+                    index, built_at, web_n = load_index()
+                    # Save metadata for sidebar display
+                    st.session_state["_index_built_at"] = built_at.astimezone().replace(tzinfo=None)
+                    st.session_state["_index_web_n"]    = web_n
+
                     chunks = retrieve(index, question, api_key, top_k=5)
                     answer, sources, src_type = generate_answer(question, chunks, api_key)
 
+                except Exception as exc:
+                    answer = f"❌ Gabim gjatë përpunimit: {exc}"
+                    st.error(answer)
+
+                if answer:
                     if src_type == "web":
                         st.info("🌐 Nuk u gjet në dokumentet tuaja — po kërkohet në internet.")
                     elif src_type == "documents":
@@ -425,5 +581,3 @@ if question:
                         "role": "assistant", "content": answer,
                         "sources": sources, "src_type": src_type,
                     })
-                except Exception as e:
-                    st.error(f"Gabim: {e}")

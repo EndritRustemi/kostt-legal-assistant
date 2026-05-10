@@ -1,0 +1,42 @@
+[
+  {
+    "url": "https://www.kostt.com",
+    "label": "KOSTT",
+    "category": "KOSTT"
+  },
+  {
+    "url": "https://www.zrre.rks-gov.net",
+    "label": "ZRRE",
+    "category": "ZRRE"
+  },
+  {
+    "url": "https://www.kek-energy.com",
+    "label": "KEK Energy",
+    "category": "KEK"
+  },
+  {
+    "url": "https://www.kesco.com",
+    "label": "KESCO",
+    "category": "KESCO"
+  },
+  {
+    "url": "https://www.keds-energy.com",
+    "label": "KEDS",
+    "category": "KEDS"
+  },
+  {
+    "url": "https://www.entsoe.eu",
+    "label": "ENTSO-E",
+    "category": "ENTSO-E"
+  },
+  {
+    "url": "https://www.energy-community.org",
+    "label": "Energy Community",
+    "category": "Energy Community"
+  },
+  {
+    "url": "https://gzk.rks-gov.net",
+    "label": "Gazeta Zyrtare e Kosovës",
+    "category": "Gazeta Zyrtare"
+  }
+]

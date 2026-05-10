@@ -8,3 +8,9 @@ data/laws/**/*.pdf
 !data/laws/zrre/.gitkeep
 !data/laws/entso-e/.gitkeep
 !data/laws/eu/.gitkeep
+!data/laws/strategjike/.gitkeep
+!data/laws/vendime/.gitkeep
+!data/laws/te-tjera/.gitkeep
+!data/laws/ligjet/.gitkeep
+!data/laws/kontratat/.gitkeep
+!data/laws/raportet/.gitkeep

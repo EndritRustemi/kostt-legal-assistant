@@ -1,13 +1,13 @@
 """
-Gjeneron përgjigje me Gemini Flash — thirrje direkte REST, pa SDK.
+Gjeneron përgjigje me Claude (Anthropic) bazuar në dokumente të ngarkuara.
 Fallback: nëse dokumentet nuk kanë përgjigje, kërkon në internet.
 """
 
-import requests
+import anthropic
 from duckduckgo_search import DDGS
 
-GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent"
-RELEVANCE_THRESHOLD = 0.45  # nën këtë skor → kërko në internet
+MODEL            = "claude-sonnet-4-6"
+RELEVANCE_THRESHOLD = 0.45   # nën këtë skor → kërko në internet
 
 NOT_FOUND_PHRASES = [
     "nuk gjendet", "nuk gjindet", "nuk ka", "nuk përmend",
@@ -35,15 +35,16 @@ Rregullat:
 5. Stil juridik: formal, i saktë."""
 
 
-def _call_gemini(system: str, prompt: str, api_key: str) -> str:
-    payload = {
-        "system_instruction": {"parts": [{"text": system}]},
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 2048},
-    }
-    r = requests.post(GEMINI_URL, params={"key": api_key}, json=payload, timeout=60)
-    r.raise_for_status()
-    return r.json()["candidates"][0]["content"]["parts"][0]["text"]
+def _call_claude(system: str, prompt: str, api_key: str) -> str:
+    client = anthropic.Anthropic(api_key=api_key)
+    message = client.messages.create(
+        model=MODEL,
+        max_tokens=2048,
+        temperature=0.1,
+        system=system,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return message.content[0].text
 
 
 def _web_search(query: str, max_results: int = 5) -> list[dict]:
@@ -73,35 +74,64 @@ def generate_answer(question: str, chunks: list[dict], api_key: str) -> tuple[st
                 f"{chunk['text']}"
             )
         context = "\n\n---\n\n".join(context_parts)
-        prompt = f"KONTEKST JURIDIK:\n{context}\n\nPYETJA: {question}\n\nJepni përgjigje të saktë juridike me citime burimi."
-        answer = _call_gemini(SYSTEM_DOC, prompt, api_key)
+        prompt = (
+            f"KONTEKST JURIDIK:\n{context}\n\n"
+            f"PYETJA: {question}\n\n"
+            f"Jepni përgjigje të saktë juridike me citime burimi."
+        )
+        answer = _call_claude(SYSTEM_DOC, prompt, api_key)
 
-        # Nëse LLM thotë "nuk gjendet" → kalo te interneti
+        # Nëse Claude thotë "nuk gjendet" → kalo te interneti
         answer_lower = answer.lower()
         llm_not_found = any(phrase in answer_lower for phrase in NOT_FOUND_PHRASES)
         if not llm_not_found:
-            sources = [{"doc": c["source"], "category": c["category"], "page": c["page"],
-                        "snippet": c["snippet"], "score": c["score"], "url": ""} for c in chunks]
+            sources = [
+                {
+                    "doc":      c["source"],
+                    "category": c["category"],
+                    "page":     c["page"],
+                    "snippet":  c["snippet"],
+                    "score":    c["score"],
+                    "url":      "",
+                }
+                for c in chunks
+            ]
             return answer, sources, "documents"
 
     # ── Fallback: kërkim në internet ──────────────────────────────────────────
     search_query = f"legjislacion energji Kosovë KOSTT ZRRE {question}"
-    web_results = _web_search(search_query)
+    web_results  = _web_search(search_query)
 
     if not web_results:
-        # Nëse edhe interneti dështon, përgjigje e drejtpërdrejtë nga Gemini
-        prompt = f"PYETJA (pa kontekst dokumentesh): {question}\n\nPërgjigjuni bazuar në njohuritë tuaja për legjislacionin e energjisë."
-        answer = _call_gemini(SYSTEM_WEB, prompt, api_key)
+        prompt = (
+            f"PYETJA (pa kontekst dokumentesh): {question}\n\n"
+            f"Përgjigjuni bazuar në njohuritë tuaja për legjislacionin e energjisë."
+        )
+        answer = _call_claude(SYSTEM_WEB, prompt, api_key)
         return answer, [], "web"
 
     context_parts = []
     for i, r in enumerate(web_results, 1):
-        context_parts.append(f"[{i}] {r.get('title','')}\nURL: {r.get('href','')}\n{r.get('body','')}")
+        context_parts.append(
+            f"[{i}] {r.get('title', '')}\nURL: {r.get('href', '')}\n{r.get('body', '')}"
+        )
     context = "\n\n---\n\n".join(context_parts)
-    prompt = f"REZULTATE NGA INTERNETI:\n{context}\n\nPYETJA: {question}\n\nSintetizoni përgjigjen duke cituar URL-të."
-    answer = _call_gemini(SYSTEM_WEB, prompt, api_key)
+    prompt = (
+        f"REZULTATE NGA INTERNETI:\n{context}\n\n"
+        f"PYETJA: {question}\n\n"
+        f"Sintetizoni përgjigjen duke cituar URL-të."
+    )
+    answer = _call_claude(SYSTEM_WEB, prompt, api_key)
 
-    web_sources = [{"doc": r.get("title", "Web"), "category": "Internet", "page": "-",
-                    "snippet": r.get("body", "")[:120], "score": "-",
-                    "url": r.get("href", "")} for r in web_results]
+    web_sources = [
+        {
+            "doc":     r.get("title", "Web"),
+            "category": "Internet",
+            "page":    "-",
+            "snippet": r.get("body", "")[:120],
+            "score":   "-",
+            "url":     r.get("href", ""),
+        }
+        for r in web_results
+    ]
     return answer, web_sources, "web"

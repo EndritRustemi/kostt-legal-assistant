@@ -4,7 +4,7 @@ Kërkim vektorial: embedo pyetjen (lokal) → gjej chunks më të ngjashme
 
 import chromadb
 from sentence_transformers import SentenceTransformer
-from rag.ingest import EMBED_MODEL
+from rag.indexer import EMBED_MODEL
 
 _model = None
 

@@ -4,7 +4,7 @@ Energy Law & Legal AI by ENDRIT — RAG System
 
 import os
 import shutil
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 
 import streamlit as st
 from pathlib import Path
@@ -16,27 +16,6 @@ from rag.web_scraper import scrape_url, load_web_sources, save_web_sources, KNOW
 
 LAWS_DIR         = Path(__file__).parent / "data" / "laws"
 WEB_SOURCES_PATH = Path(__file__).parent / "data" / "web_sources.json"
-REFRESH_CFG_PATH = Path(__file__).parent / "data" / "refresh_cfg.txt"
-
-_REFRESH_OPTIONS = {
-    "Çdo 1 orë":   1,
-    "Çdo 3 orë":   3,
-    "Çdo 6 orë":   6,
-    "Çdo 12 orë":  12,
-    "Çdo 24 orë":  24,
-}
-
-
-def _load_refresh_hours() -> int:
-    try:
-        return int(REFRESH_CFG_PATH.read_text().strip())
-    except Exception:
-        return 6
-
-
-def _save_refresh_hours(hours: int) -> None:
-    REFRESH_CFG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    REFRESH_CFG_PATH.write_text(str(hours))
 
 st.set_page_config(
     page_title="Energy Law & Legal AI by ENDRIT",
@@ -101,46 +80,43 @@ def get_api_key() -> str:
     return api or st.session_state.get("api_key", "")
 
 
-# ── STARTUP: sync PDFs from HF Dataset repo ───────────────────────────────────
+# ── STARTUP: sync only user-uploaded PDFs from HF Dataset ────────────────────
+# PDFs bundled in the repo are already present — no snapshot_download needed.
+# This only fetches files that were uploaded via the sidebar after a restart.
 
-@st.cache_resource(show_spinner="Duke ngarkuar dokumentet...")
-def _sync_pdfs() -> str:
+@st.cache_resource(show_spinner=False)
+def _sync_user_uploads() -> int:
     hf_token   = _secret("HF_TOKEN")
     hf_dataset = _secret("HF_DATASET_ID")
-
-    if not hf_token:
-        return "MISSING:HF_TOKEN"
-    if not hf_dataset:
-        return "MISSING:HF_DATASET_ID"
-
+    if not hf_token or not hf_dataset:
+        return 0
     try:
-        from huggingface_hub import snapshot_download
-        tmp = "/tmp/hf_legal_docs"
-        snapshot_download(
-            repo_id=hf_dataset,
-            repo_type="dataset",
-            token=hf_token,
-            local_dir=tmp,
-            local_dir_use_symlinks=False,
-        )
-        app_dir = Path(__file__).parent
-        count = 0
-        for pdf in Path(tmp).rglob("*.pdf"):
-            rel  = pdf.relative_to(tmp)
-            dest = app_dir / rel
+        from huggingface_hub import HfApi, hf_hub_download
+        api      = HfApi()
+        app_dir  = Path(__file__).parent
+        fetched  = 0
+        for f in api.list_repo_files(repo_id=hf_dataset, repo_type="dataset",
+                                     token=hf_token):
+            if not f.endswith(".pdf"):
+                continue
+            dest = app_dir / f
+            if dest.exists():        # already present (baked into git)
+                continue
             dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(pdf, dest)
-            count += 1
-        return f"OK:{count}"
-    except Exception as e:
-        return f"ERR:{e}"
+            hf_hub_download(repo_id=hf_dataset, filename=f,
+                            repo_type="dataset", token=hf_token,
+                            local_dir=str(app_dir),
+                            local_dir_use_symlinks=False)
+            fetched += 1
+        return fetched
+    except Exception:
+        return 0
 
-_SYNC_STATUS = _sync_pdfs()
+_sync_user_uploads()
 
 
 @st.cache_resource(show_spinner="Duke ngarkuar indeksin e dokumenteve...")
 def load_index():
-    """Build (or reload from disk cache) the ChromaDB index."""
     col      = build_index(LAWS_DIR)
     built_at = datetime.now()
     return col, built_at
@@ -173,8 +149,6 @@ with st.sidebar:
     st.markdown("---")
 
     st.markdown("### 📂 Dokumentet")
-    if _SYNC_STATUS.startswith("ERR") or _SYNC_STATUS.startswith("MISSING"):
-        st.warning(f"⚠️ Sync: {_SYNC_STATUS}")
     counts = count_pdfs(LAWS_DIR)
     total  = sum(counts.values())
     for cat_key, n in counts.items():

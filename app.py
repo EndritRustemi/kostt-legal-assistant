@@ -138,25 +138,16 @@ def _sync_pdfs() -> str:
 _SYNC_STATUS = _sync_pdfs()
 
 
-# TTL read once at module load — stable function reference keeps Streamlit cache valid.
-# Changing the interval via the selectbox clears the cache + reruns, so the new TTL
-# is picked up on the next app start without recreating this function.
-_REFRESH_HOURS = _load_refresh_hours()
-
-
-@st.cache_resource(
-    show_spinner="Duke indeksuar dokumentet dhe burimet web...",
-    ttl=timedelta(hours=_REFRESH_HOURS),
-)
+@st.cache_resource(show_spinner="Duke ngarkuar indeksin e dokumenteve...")
 def load_index():
-    web_sources = load_web_sources(WEB_SOURCES_PATH)
-    web_chunks  = []
-    for src in web_sources:
-        fetched = scrape_url(src["url"], label=src["label"], category=src["category"])
-        web_chunks.extend(fetched)
-    col      = build_index(LAWS_DIR, extra_chunks=web_chunks)
+    """
+    Build (or reload from disk cache) the ChromaDB index.
+    Web sources are NOT scraped here — they slow startup dramatically.
+    Use the "Rifresko burimet web" button in the sidebar for on-demand scraping.
+    """
+    col      = build_index(LAWS_DIR)
     built_at = datetime.now()
-    return col, built_at, len(web_chunks)
+    return col, built_at
 
 
 # ── SIDEBAR ───────────────────────────────────────────────────────────────────
@@ -342,32 +333,9 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### 🌐 Burime Web")
 
-    # Show last refresh info from session state (set after a successful answer)
     if st.session_state.get("_index_built_at"):
-        _built_at   = st.session_state["_index_built_at"]
-        _web_n      = st.session_state.get("_index_web_n", 0)
-        _hours      = _load_refresh_hours()
-        _next       = _built_at + timedelta(hours=_hours)
-        st.caption(
-            f"🕐 Rifreskuar: {_built_at.strftime('%d %b %Y, %H:%M')}"
-            f"  |  ⏳ Rifreshim tjetër: {_next.strftime('%H:%M')}"
-            f"  |  🌐 {_web_n} paraqitje web"
-        )
-
-    # Refresh interval selector — saves choice, does NOT rerun (avoids losing question)
-    _current_hours = _load_refresh_hours()
-    _current_label = next(
-        (k for k, v in _REFRESH_OPTIONS.items() if v == _current_hours), "Çdo 6 orë"
-    )
-    _sel = st.selectbox(
-        "⏱ Rifreskim automatik",
-        list(_REFRESH_OPTIONS.keys()),
-        index=list(_REFRESH_OPTIONS.keys()).index(_current_label),
-    )
-    if _REFRESH_OPTIONS[_sel] != _current_hours:
-        _save_refresh_hours(_REFRESH_OPTIONS[_sel])
-        st.cache_resource.clear()
-        st.rerun()
+        _built_at = st.session_state["_index_built_at"]
+        st.caption(f"🕐 Indeksi ndërtuar: {_built_at.strftime('%d %b %Y, %H:%M')}")
 
     web_sources = load_web_sources(WEB_SOURCES_PATH)
 
@@ -465,26 +433,15 @@ for i, msg in enumerate(st.session_state.messages):
         else:
             st.markdown(msg["content"])
             if msg.get("sources"):
-                label = ("🌐 Burimet nga Interneti"
-                         if msg.get("src_type") == "web"
-                         else f"📚 Burimet ({len(msg['sources'])})")
-                with st.expander(label):
+                with st.expander(f"📚 Burimet ({len(msg['sources'])})"):
                     for src in msg["sources"]:
-                        if msg.get("src_type") == "web" and src.get("url"):
-                            st.markdown(
-                                f'<div class="source-card">🌐 <b>'
-                                f'<a href="{src["url"]}" target="_blank">{src["doc"]}</a></b><br>'
-                                f'<i>{src["snippet"]}...</i></div>',
-                                unsafe_allow_html=True,
-                            )
-                        else:
-                            st.markdown(
-                                f'<div class="source-card">📄 <b>{src["doc"]}</b> · '
-                                f'{src["category"]} · Faqja {src["page"]}'
-                                f' <span class="score-badge">{src["score"]}</span><br>'
-                                f'<i>{src["snippet"]}...</i></div>',
-                                unsafe_allow_html=True,
-                            )
+                        st.markdown(
+                            f'<div class="source-card">📄 <b>{src["doc"]}</b> · '
+                            f'{src["category"]} · Faqja {src["page"]}'
+                            f' <span class="score-badge">{src["score"]}</span><br>'
+                            f'<i>{src["snippet"]}...</i></div>',
+                            unsafe_allow_html=True,
+                        )
 
 # ── EDIT MODE ─────────────────────────────────────────────────────────────────
 
@@ -535,47 +492,34 @@ if question:
                 sources = []
                 src_type = "none"
                 try:
-                    index, built_at, web_n = load_index()
-                    # Save metadata for sidebar display
+                    index, built_at = load_index()
                     st.session_state["_index_built_at"] = built_at.astimezone().replace(tzinfo=None)
-                    st.session_state["_index_web_n"]    = web_n
 
-                    chunks = retrieve(index, question, api_key, top_k=5)
+                    chunks = retrieve(index, question, api_key, top_k=6)
                     answer, sources, src_type = generate_answer(question, chunks, api_key)
 
                 except Exception as exc:
                     answer = f"❌ Gabim gjatë përpunimit: {exc}"
-                    st.error(answer)
+                    src_type = "none"
 
                 if answer:
-                    if src_type == "web":
-                        st.info("🌐 Nuk u gjet në dokumentet tuaja — po kërkohet në internet.")
+                    if src_type == "general":
+                        st.info("ℹ️ Nuk u gjet informacion i mjaftueshëm në dokumentet e ngarkuara — përgjigja bazohet në njohuritë e Claude.")
                     elif src_type == "documents":
-                        st.success("📄 U gjet në dokumentet tuaja.")
+                        st.success("📄 U gjet në dokumentet e ngarkuara.")
 
                     st.markdown(answer)
 
                     if sources:
-                        label = ("🌐 Burimet nga Interneti"
-                                 if src_type == "web"
-                                 else f"📚 Burimet ({len(sources)})")
-                        with st.expander(label):
+                        with st.expander(f"📚 Burimet ({len(sources)})"):
                             for src in sources:
-                                if src_type == "web" and src.get("url"):
-                                    st.markdown(
-                                        f'<div class="source-card">🌐 <b>'
-                                        f'<a href="{src["url"]}" target="_blank">{src["doc"]}</a></b><br>'
-                                        f'<i>{src["snippet"]}...</i></div>',
-                                        unsafe_allow_html=True,
-                                    )
-                                else:
-                                    st.markdown(
-                                        f'<div class="source-card">📄 <b>{src["doc"]}</b> · '
-                                        f'{src["category"]} · Faqja {src["page"]}'
-                                        f' <span class="score-badge">{src["score"]}</span><br>'
-                                        f'<i>{src["snippet"]}...</i></div>',
-                                        unsafe_allow_html=True,
-                                    )
+                                st.markdown(
+                                    f'<div class="source-card">📄 <b>{src["doc"]}</b> · '
+                                    f'{src["category"]} · Faqja {src["page"]}'
+                                    f' <span class="score-badge">{src["score"]}</span><br>'
+                                    f'<i>{src["snippet"]}...</i></div>',
+                                    unsafe_allow_html=True,
+                                )
 
                     st.session_state.messages.append({
                         "role": "assistant", "content": answer,

@@ -1,9 +1,12 @@
 """
 indexer.py -- ChromaDB index builder for the Streamlit app.
 
-Reads PDFs from the laws directory + optional web chunks,
-embeds them with sentence-transformers, and returns a
-ChromaDB collection ready for retrieval.
+Uses PersistentClient with fingerprint-based cache: if the set of PDFs
+has not changed since the last build, the existing on-disk index is
+returned immediately (no re-embedding).
+
+First build: slow (embeds all chunks).
+Subsequent calls with same PDFs: instant (loads from disk).
 """
 
 from __future__ import annotations
@@ -35,8 +38,10 @@ CATEGORIES: dict[str, str] = {
     "raportet":    "Raporte & Manuale",
 }
 
-_CHUNK_SIZE  = 600   # target characters per chunk
-_CHUNK_OVER  = 80    # overlap between adjacent chunks
+_CHUNK_SIZE  = 800   # larger chunks → fewer total chunks → faster embedding
+_CHUNK_OVER  = 100   # overlap between adjacent chunks
+_CHROMA_DIR  = Path("/tmp/chroma_legal")
+_FP_FILE     = _CHROMA_DIR / "fingerprint.txt"
 
 _model_cache: SentenceTransformer | None = None
 
@@ -46,6 +51,40 @@ def _get_model() -> SentenceTransformer:
     if _model_cache is None:
         _model_cache = SentenceTransformer(EMBED_MODEL)
     return _model_cache
+
+
+# ── Fingerprint ────────────────────────────────────────────────────────────────
+
+def _fingerprint(laws_dir: Path, extra_n: int = 0) -> str:
+    """
+    MD5 of all PDF names+sizes across CATEGORIES folders + number of web chunks.
+    Changes when any PDF is added, removed, or replaced.
+    """
+    parts: list[str] = []
+    for cat_key in sorted(CATEGORIES):
+        folder = laws_dir / cat_key
+        if not folder.exists():
+            continue
+        for pdf in sorted(folder.glob("*.pdf")):
+            parts.append(f"{cat_key}/{pdf.name}:{pdf.stat().st_size}")
+    parts.append(f"web:{extra_n}")
+    return hashlib.md5("|".join(parts).encode()).hexdigest()[:12]
+
+
+def _try_load_existing(fp: str) -> chromadb.Collection | None:
+    """Return cached collection if fingerprint matches, else None."""
+    if not _FP_FILE.exists():
+        return None
+    if _FP_FILE.read_text().strip() != fp:
+        return None
+    try:
+        client = chromadb.PersistentClient(path=str(_CHROMA_DIR))
+        col = client.get_collection("legal_docs")
+        if col.count() > 0:
+            return col
+    except Exception:
+        pass
+    return None
 
 
 # ── PDF extraction ─────────────────────────────────────────────────────────────
@@ -74,7 +113,6 @@ def _split_text(text: str, size: int = _CHUNK_SIZE, overlap: int = _CHUNK_OVER) 
     chunks, start = [], 0
     while start < len(text):
         end = min(start + size, len(text))
-        # Snap to word boundary
         if end < len(text):
             snap = text.rfind(" ", start, end)
             if snap > start:
@@ -105,26 +143,45 @@ def build_index(
     extra_chunks: list[dict[str, Any]] | None = None,
 ) -> chromadb.Collection:
     """
-    Build an in-memory ChromaDB collection from PDFs + optional web chunks.
+    Return a ChromaDB collection of all PDFs + optional web chunks.
+
+    If the fingerprint (set of PDFs + web chunk count) matches the last
+    successful build, the persisted index is returned immediately without
+    any re-embedding. Otherwise a full rebuild is performed and persisted.
 
     Parameters
     ----------
     laws_dir     : root folder containing per-category sub-folders with PDFs
-    extra_chunks : web chunks returned by web_scraper.scrape_url(); each dict
-                   must have keys: text, source, category, page, snippet
-
-    Returns
-    -------
-    chromadb.Collection  ready for retriever.retrieve()
+    extra_chunks : web chunks from web_scraper.scrape_url()
     """
-    model  = _get_model()
-    client = chromadb.EphemeralClient()
-    col    = client.get_or_create_collection(
+    extra_chunks = extra_chunks or []
+    fp = _fingerprint(laws_dir, len(extra_chunks))
+
+    # ── Cache hit: return persisted index ─────────────────────────────────────
+    cached = _try_load_existing(fp)
+    if cached is not None:
+        return cached
+
+    # ── Full rebuild ──────────────────────────────────────────────────────────
+    _CHROMA_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Delete stale collection if it exists
+    try:
+        client = chromadb.PersistentClient(path=str(_CHROMA_DIR))
+        client.delete_collection("legal_docs")
+    except Exception:
+        pass
+
+    client = chromadb.PersistentClient(path=str(_CHROMA_DIR))
+    col = client.get_or_create_collection(
         "legal_docs",
         metadata={"hnsw:space": "cosine"},
     )
 
-    texts, ids, metas = [], [], []
+    model = _get_model()
+    texts: list[str] = []
+    ids:   list[str] = []
+    metas: list[dict] = []
 
     # ── PDFs ──────────────────────────────────────────────────────────────────
     for cat_key, cat_label in CATEGORIES.items():
@@ -145,7 +202,7 @@ def build_index(
                     })
 
     # ── Web chunks ────────────────────────────────────────────────────────────
-    for chunk in (extra_chunks or []):
+    for chunk in extra_chunks:
         text = chunk.get("text", "").strip()
         if not text:
             continue
@@ -162,19 +219,26 @@ def build_index(
         })
 
     if not texts:
+        _FP_FILE.write_text(fp)
         return col
 
-    # ── Embed + add in batches of 100 ────────────────────────────────────────
-    embeddings = model.encode(texts, convert_to_numpy=True,
-                              normalize_embeddings=True,
-                              show_progress_bar=False).tolist()
-    batch = 100
+    # ── Embed + add in batches ────────────────────────────────────────────────
+    embeddings = model.encode(
+        texts,
+        convert_to_numpy=True,
+        normalize_embeddings=True,
+        show_progress_bar=False,
+        batch_size=64,
+    ).tolist()
+
+    batch = 200
     for i in range(0, len(texts), batch):
         col.add(
-            documents=embeddings[i : i + batch],
+            documents=texts[i : i + batch],        # text (not embeddings) ← bug fix
             embeddings=embeddings[i : i + batch],
             ids=ids[i : i + batch],
             metadatas=metas[i : i + batch],
         )
 
+    _FP_FILE.write_text(fp)   # save fingerprint only after successful build
     return col

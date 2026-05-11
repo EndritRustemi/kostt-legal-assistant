@@ -3,21 +3,11 @@ Kërkim vektorial: embedo pyetjen (lokal) → gjej chunks më të ngjashme
 """
 
 import chromadb
-from sentence_transformers import SentenceTransformer
-from rag.indexer import EMBED_MODEL
-
-_model = None
-
-
-def _get_model() -> SentenceTransformer:
-    global _model
-    if _model is None:
-        _model = SentenceTransformer(EMBED_MODEL)
-    return _model
+from rag.embedder import get_model
 
 
 def retrieve(col: chromadb.Collection, question: str, api_key: str = "", top_k: int = 5) -> list[dict]:
-    model = _get_model()
+    model = get_model()
     query_embedding = model.encode([question])[0].tolist()
 
     results = col.query(

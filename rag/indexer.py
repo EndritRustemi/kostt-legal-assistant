@@ -1,12 +1,11 @@
 """
 indexer.py -- ChromaDB index builder for the Streamlit app.
 
-Uses PersistentClient with fingerprint-based cache: if the set of PDFs
-has not changed since the last build, the existing on-disk index is
-returned immediately (no re-embedding).
+Fingerprint-based cache: if the set of PDFs has not changed since the
+last build, the existing on-disk index is returned immediately.
 
-First build: slow (embeds all chunks).
-Subsequent calls with same PDFs: instant (loads from disk).
+Memory-safe: each PDF is processed and embedded independently so there
+is never a large all-text list in memory at once.
 """
 
 from __future__ import annotations
@@ -17,14 +16,12 @@ from pathlib import Path
 from typing import Any
 
 import chromadb
-from sentence_transformers import SentenceTransformer
+
+from rag.embedder import get_model, EMBED_MODEL  # shared singleton
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
-EMBED_MODEL = "paraphrase-multilingual-MiniLM-L12-v2"
-
 CATEGORIES: dict[str, str] = {
-    # Primary folders — synced from HF Dataset
     "kosove":      "Legjislacioni i Kosovës",
     "zrre":        "Rregulloret ZRRE",
     "entso-e":     "Rregulloret ENTSO-E",
@@ -32,34 +29,18 @@ CATEGORIES: dict[str, str] = {
     "strategjike": "Dokumentet Strategjike",
     "vendime":     "Vendime",
     "te-tjera":    "Të Tjera",
-    # Additional document folders
-    "ligjet":      "Ligje (Civile & Procedurale)",
     "kontratat":   "Kontrata",
     "raportet":    "Raporte & Manuale",
 }
 
-_CHUNK_SIZE  = 800   # larger chunks → fewer total chunks → faster embedding
-_CHUNK_OVER  = 100   # overlap between adjacent chunks
+_CHUNK_SIZE  = 800
+_CHUNK_OVER  = 100
 _CHROMA_DIR  = Path("/tmp/chroma_legal")
 _FP_FILE     = _CHROMA_DIR / "fingerprint.txt"
-
-_model_cache: SentenceTransformer | None = None
-
-
-def _get_model() -> SentenceTransformer:
-    global _model_cache
-    if _model_cache is None:
-        _model_cache = SentenceTransformer(EMBED_MODEL)
-    return _model_cache
-
 
 # ── Fingerprint ────────────────────────────────────────────────────────────────
 
 def _fingerprint(laws_dir: Path, extra_n: int = 0) -> str:
-    """
-    MD5 of all PDF names+sizes across CATEGORIES folders + number of web chunks.
-    Changes when any PDF is added, removed, or replaced.
-    """
     parts: list[str] = []
     for cat_key in sorted(CATEGORIES):
         folder = laws_dir / cat_key
@@ -72,7 +53,6 @@ def _fingerprint(laws_dir: Path, extra_n: int = 0) -> str:
 
 
 def _try_load_existing(fp: str) -> chromadb.Collection | None:
-    """Return cached collection if fingerprint matches, else None."""
     if not _FP_FILE.exists():
         return None
     if _FP_FILE.read_text().strip() != fp:
@@ -86,11 +66,9 @@ def _try_load_existing(fp: str) -> chromadb.Collection | None:
         pass
     return None
 
-
 # ── PDF extraction ─────────────────────────────────────────────────────────────
 
 def _extract_pdf_pages(path: Path) -> list[tuple[int, str]]:
-    """Return [(page_number, text), ...] for a PDF."""
     try:
         import fitz
         doc = fitz.open(str(path))
@@ -106,7 +84,6 @@ def _extract_pdf_pages(path: Path) -> list[tuple[int, str]]:
 
 
 def _split_text(text: str, size: int = _CHUNK_SIZE, overlap: int = _CHUNK_OVER) -> list[str]:
-    """Split text into overlapping chunks of approximately `size` characters."""
     text = re.sub(r"\s+", " ", text).strip()
     if len(text) <= size:
         return [text] if text else []
@@ -126,11 +103,9 @@ def _chunk_id(source: str, page: int | str, idx: int) -> str:
     raw = f"{source}|{page}|{idx}"
     return hashlib.md5(raw.encode()).hexdigest()[:16]
 
-
 # ── Public API ─────────────────────────────────────────────────────────────────
 
 def count_pdfs(laws_dir: Path) -> dict[str, int]:
-    """Return {category_key: pdf_count} for all category sub-folders."""
     result: dict[str, int] = {}
     for key in CATEGORIES:
         folder = laws_dir / key
@@ -145,19 +120,12 @@ def build_index(
     """
     Return a ChromaDB collection of all PDFs + optional web chunks.
 
-    If the fingerprint (set of PDFs + web chunk count) matches the last
-    successful build, the persisted index is returned immediately without
-    any re-embedding. Otherwise a full rebuild is performed and persisted.
-
-    Parameters
-    ----------
-    laws_dir     : root folder containing per-category sub-folders with PDFs
-    extra_chunks : web chunks from web_scraper.scrape_url()
+    Memory-safe: each PDF is embedded and added to ChromaDB individually
+    so peak memory is bounded by a single document, not the entire corpus.
     """
     extra_chunks = extra_chunks or []
     fp = _fingerprint(laws_dir, len(extra_chunks))
 
-    # ── Cache hit: return persisted index ─────────────────────────────────────
     cached = _try_load_existing(fp)
     if cached is not None:
         return cached
@@ -165,7 +133,6 @@ def build_index(
     # ── Full rebuild ──────────────────────────────────────────────────────────
     _CHROMA_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Delete stale collection if it exists
     try:
         client = chromadb.PersistentClient(path=str(_CHROMA_DIR))
         client.delete_collection("legal_docs")
@@ -178,18 +145,20 @@ def build_index(
         metadata={"hnsw:space": "cosine"},
     )
 
-    model = _get_model()
-    texts: list[str] = []
-    ids:   list[str] = []
-    metas: list[dict] = []
+    model = get_model()
+    total_added = 0
 
-    # ── PDFs ──────────────────────────────────────────────────────────────────
+    # ── PDFs — one at a time to keep peak memory low ──────────────────────────
     for cat_key, cat_label in CATEGORIES.items():
         folder = laws_dir / cat_key
         if not folder.exists():
             continue
         for pdf_path in sorted(folder.glob("*.pdf")):
             source = pdf_path.stem
+            texts: list[str] = []
+            ids:   list[str] = []
+            metas: list[dict] = []
+
             for page_num, page_text in _extract_pdf_pages(pdf_path):
                 for idx, chunk_text in enumerate(_split_text(page_text)):
                     texts.append(chunk_text)
@@ -201,44 +170,64 @@ def build_index(
                         "snippet":  chunk_text[:120],
                     })
 
+            if not texts:
+                continue
+
+            embeddings = model.encode(
+                texts,
+                convert_to_numpy=True,
+                normalize_embeddings=True,
+                show_progress_bar=False,
+                batch_size=32,
+            ).tolist()
+
+            batch = 100
+            for i in range(0, len(texts), batch):
+                col.add(
+                    documents=texts[i : i + batch],
+                    embeddings=embeddings[i : i + batch],
+                    ids=ids[i : i + batch],
+                    metadatas=metas[i : i + batch],
+                )
+            total_added += len(texts)
+
     # ── Web chunks ────────────────────────────────────────────────────────────
-    for chunk in extra_chunks:
-        text = chunk.get("text", "").strip()
-        if not text:
-            continue
-        src  = str(chunk.get("source", "web"))
-        page = chunk.get("page", "web")
-        idx  = chunk.get("_idx", 0)
-        texts.append(text)
-        ids.append(_chunk_id(src, page, idx))
-        metas.append({
-            "source":   src,
-            "category": str(chunk.get("category", "Web")),
-            "page":     str(page),
-            "snippet":  chunk.get("snippet", text[:120]),
-        })
+    if extra_chunks:
+        web_texts:  list[str] = []
+        web_ids:    list[str] = []
+        web_metas:  list[dict] = []
+        for chunk in extra_chunks:
+            text = chunk.get("text", "").strip()
+            if not text:
+                continue
+            src  = str(chunk.get("source", "web"))
+            page = chunk.get("page", "web")
+            idx  = chunk.get("_idx", 0)
+            web_texts.append(text)
+            web_ids.append(_chunk_id(src, page, idx))
+            web_metas.append({
+                "source":   src,
+                "category": str(chunk.get("category", "Web")),
+                "page":     str(page),
+                "snippet":  chunk.get("snippet", text[:120]),
+            })
 
-    if not texts:
-        _FP_FILE.write_text(fp)
-        return col
+        if web_texts:
+            embeddings = model.encode(
+                web_texts,
+                convert_to_numpy=True,
+                normalize_embeddings=True,
+                show_progress_bar=False,
+                batch_size=32,
+            ).tolist()
+            batch = 100
+            for i in range(0, len(web_texts), batch):
+                col.add(
+                    documents=web_texts[i : i + batch],
+                    embeddings=embeddings[i : i + batch],
+                    ids=web_ids[i : i + batch],
+                    metadatas=web_metas[i : i + batch],
+                )
 
-    # ── Embed + add in batches ────────────────────────────────────────────────
-    embeddings = model.encode(
-        texts,
-        convert_to_numpy=True,
-        normalize_embeddings=True,
-        show_progress_bar=False,
-        batch_size=64,
-    ).tolist()
-
-    batch = 200
-    for i in range(0, len(texts), batch):
-        col.add(
-            documents=texts[i : i + batch],        # text (not embeddings) ← bug fix
-            embeddings=embeddings[i : i + batch],
-            ids=ids[i : i + batch],
-            metadatas=metas[i : i + batch],
-        )
-
-    _FP_FILE.write_text(fp)   # save fingerprint only after successful build
+    _FP_FILE.write_text(fp)
     return col

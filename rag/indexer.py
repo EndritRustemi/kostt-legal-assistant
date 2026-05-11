@@ -1,12 +1,8 @@
 """
-indexer.py -- Builds the in-memory VectorStore for the Streamlit app.
+indexer.py -- Builds the in-memory BM25 VectorStore for the Streamlit app.
 
-Memory-safe: each PDF is embedded and added individually so peak memory
-is bounded by a single document's chunks, not the whole corpus.
-
-The VectorStore is cached by @st.cache_resource in app.py and survives
-for the lifetime of the Streamlit process. Clearing the cache (e.g. via
-"Ri-indekso" button) triggers a full rebuild on next call.
+No ML model, no network download, no heavy dependencies.
+Each PDF is read and chunked; BM25 index is built lazily on first query.
 """
 
 from __future__ import annotations
@@ -16,7 +12,6 @@ import re
 from pathlib import Path
 from typing import Any
 
-from rag.embedder import encode_passages, EMBED_MODEL
 from rag.vector_store import VectorStore
 
 # ── Config ─────────────────────────────────────────────────────────────────────
@@ -88,12 +83,12 @@ def build_index(
     extra_chunks: list[dict[str, Any]] | None = None,
 ) -> VectorStore:
     """
-    Build an in-memory VectorStore from all PDFs + optional web chunks.
-    Each PDF is embedded individually to keep peak memory minimal.
+    Read all PDFs, chunk the text, and return a BM25 VectorStore.
+    No embedding model is loaded — index builds in seconds, not minutes.
     """
     store = VectorStore()
 
-    # ── PDFs — one at a time ──────────────────────────────────────────────────
+    # ── PDFs ──────────────────────────────────────────────────────────────────
     for cat_key, cat_label in CATEGORIES.items():
         folder = laws_dir / cat_key
         if not folder.exists():
@@ -115,49 +110,33 @@ def build_index(
                         "snippet":  chunk[:120],
                     })
 
-            if not texts:
-                continue
-
-            embeddings = encode_passages(texts, batch_size=32)
-            batch = 100
-            for i in range(0, len(texts), batch):
+            if texts:
                 store.add(
-                    documents=texts[i : i + batch],
-                    embeddings=embeddings[i : i + batch],
-                    ids=ids[i : i + batch],
-                    metadatas=metas[i : i + batch],
+                    documents=texts,
+                    embeddings=[],   # BM25 — no embeddings needed
+                    ids=ids,
+                    metadatas=metas,
                 )
 
     # ── Web chunks ────────────────────────────────────────────────────────────
     if extra_chunks:
-        web_texts:  list[str]  = []
-        web_ids:    list[str]  = []
-        web_metas:  list[dict] = []
-        for chunk in (extra_chunks or []):
+        for chunk in extra_chunks:
             text = chunk.get("text", "").strip()
             if not text:
                 continue
             src  = str(chunk.get("source", "web"))
             page = chunk.get("page", "web")
             idx  = chunk.get("_idx", 0)
-            web_texts.append(text)
-            web_ids.append(_chunk_id(src, page, idx))
-            web_metas.append({
-                "source":   src,
-                "category": str(chunk.get("category", "Web")),
-                "page":     str(page),
-                "snippet":  chunk.get("snippet", text[:120]),
-            })
-
-        if web_texts:
-            embeddings = encode_passages(web_texts, batch_size=32)
-            batch = 100
-            for i in range(0, len(web_texts), batch):
-                store.add(
-                    documents=web_texts[i : i + batch],
-                    embeddings=embeddings[i : i + batch],
-                    ids=web_ids[i : i + batch],
-                    metadatas=web_metas[i : i + batch],
-                )
+            store.add(
+                documents=[text],
+                embeddings=[],
+                ids=[_chunk_id(src, page, idx)],
+                metadatas=[{
+                    "source":   src,
+                    "category": str(chunk.get("category", "Web")),
+                    "page":     str(page),
+                    "snippet":  chunk.get("snippet", text[:120]),
+                }],
+            )
 
     return store

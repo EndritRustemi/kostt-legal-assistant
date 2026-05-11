@@ -1,16 +1,15 @@
-"""Kërkim vektorial: embedo pyetjen → gjej chunks më të ngjashme."""
+"""Kërkim BM25: gjej chunks më relevante për pyetjen."""
 
-from rag.embedder import encode_query
 from rag.vector_store import VectorStore
 
 
 def retrieve(store: VectorStore, question: str, api_key: str = "", top_k: int = 5) -> list[dict]:
-    query_embedding = encode_query(question)
+    if store.count() == 0:
+        return []
 
     results = store.query(
-        query_embeddings=[query_embedding],
+        query=question,
         n_results=min(top_k, store.count()),
-        include=["documents", "metadatas", "distances"],
     )
 
     chunks = []
@@ -25,7 +24,7 @@ def retrieve(store: VectorStore, question: str, api_key: str = "", top_k: int = 
             "category": meta.get("category", ""),
             "page":     meta.get("page", 0),
             "snippet":  meta.get("snippet", doc[:120]),
-            "score":    round(1 - dist, 3),
+            "score":    round(1.0 - dist, 3),
         })
 
     return chunks

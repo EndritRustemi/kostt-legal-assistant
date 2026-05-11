@@ -140,11 +140,7 @@ _SYNC_STATUS = _sync_pdfs()
 
 @st.cache_resource(show_spinner="Duke ngarkuar indeksin e dokumenteve...")
 def load_index():
-    """
-    Build (or reload from disk cache) the ChromaDB index.
-    Web sources are NOT scraped here — they slow startup dramatically.
-    Use the "Rifresko burimet web" button in the sidebar for on-demand scraping.
-    """
+    """Build (or reload from disk cache) the ChromaDB index."""
     col      = build_index(LAWS_DIR)
     built_at = datetime.now()
     return col, built_at
@@ -334,7 +330,7 @@ with st.sidebar:
     st.markdown("### 🌐 Burime Web")
 
     if st.session_state.get("_index_built_at"):
-        _built_at = st.session_state["_index_built_at"]
+        _built_at: datetime = st.session_state["_index_built_at"]
         st.caption(f"🕐 Indeksi ndërtuar: {_built_at.strftime('%d %b %Y, %H:%M')}")
 
     web_sources = load_web_sources(WEB_SOURCES_PATH)
@@ -402,6 +398,23 @@ with st.sidebar:
 
     st.markdown("---")
     st.caption("Energy Law & Legal AI · by ENDRIT")
+
+
+# ── Eager index pre-load ──────────────────────────────────────────────────────
+# Must run BEFORE chat renders. When load_index() is called inside
+# st.chat_message() the cache_resource spinner can trigger a Streamlit
+# re-render that wipes session_state, causing the "home page" symptom.
+# Calling it here (top level) ensures a cache hit inside the question handler.
+_preload_err: str | None = None
+try:
+    _col_pre, _built_pre = load_index()
+    if "_index_built_at" not in st.session_state:
+        st.session_state["_index_built_at"] = _built_pre
+except Exception as _exc:
+    _preload_err = str(_exc)
+
+if _preload_err:
+    st.error(f"❌ Gabim gjatë ngarkimit të indeksit: {_preload_err}")
 
 
 # ── CHAT ──────────────────────────────────────────────────────────────────────
@@ -492,13 +505,14 @@ if question:
                 sources = []
                 src_type = "none"
                 try:
-                    index, built_at = load_index()
-                    st.session_state["_index_built_at"] = built_at.astimezone().replace(tzinfo=None)
+                    index, built_at = load_index()   # instant — already cached above
+                    st.session_state["_index_built_at"] = built_at
 
                     chunks = retrieve(index, question, api_key, top_k=6)
                     answer, sources, src_type = generate_answer(question, chunks, api_key)
 
                 except Exception as exc:
+                    st.error(f"❌ Gabim: {exc}")
                     answer = f"❌ Gabim gjatë përpunimit: {exc}"
                     src_type = "none"
 

@@ -17,7 +17,7 @@ from typing import Any
 
 import chromadb
 
-from rag.embedder import get_model, EMBED_MODEL  # shared singleton
+from rag.embedder import encode_passages, EMBED_MODEL
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
@@ -41,7 +41,7 @@ _FP_FILE     = _CHROMA_DIR / "fingerprint.txt"
 # ── Fingerprint ────────────────────────────────────────────────────────────────
 
 def _fingerprint(laws_dir: Path, extra_n: int = 0) -> str:
-    parts: list[str] = []
+    parts: list[str] = [f"model:{EMBED_MODEL}"]   # invalidate cache on model change
     for cat_key in sorted(CATEGORIES):
         folder = laws_dir / cat_key
         if not folder.exists():
@@ -145,9 +145,6 @@ def build_index(
         metadata={"hnsw:space": "cosine"},
     )
 
-    model = get_model()
-    total_added = 0
-
     # ── PDFs — one at a time to keep peak memory low ──────────────────────────
     for cat_key, cat_label in CATEGORIES.items():
         folder = laws_dir / cat_key
@@ -173,13 +170,7 @@ def build_index(
             if not texts:
                 continue
 
-            embeddings = model.encode(
-                texts,
-                convert_to_numpy=True,
-                normalize_embeddings=True,
-                show_progress_bar=False,
-                batch_size=32,
-            ).tolist()
+            embeddings = encode_passages(texts, batch_size=32)
 
             batch = 100
             for i in range(0, len(texts), batch):
@@ -189,8 +180,6 @@ def build_index(
                     ids=ids[i : i + batch],
                     metadatas=metas[i : i + batch],
                 )
-            total_added += len(texts)
-
     # ── Web chunks ────────────────────────────────────────────────────────────
     if extra_chunks:
         web_texts:  list[str] = []
@@ -213,13 +202,7 @@ def build_index(
             })
 
         if web_texts:
-            embeddings = model.encode(
-                web_texts,
-                convert_to_numpy=True,
-                normalize_embeddings=True,
-                show_progress_bar=False,
-                batch_size=32,
-            ).tolist()
+            embeddings = encode_passages(web_texts, batch_size=32)
             batch = 100
             for i in range(0, len(web_texts), batch):
                 col.add(

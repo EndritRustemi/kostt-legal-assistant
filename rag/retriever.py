@@ -3,12 +3,11 @@ Kërkim vektorial: embedo pyetjen (lokal) → gjej chunks më të ngjashme
 """
 
 import chromadb
-from rag.embedder import get_model
+from rag.embedder import encode_query
 
 
 def retrieve(col: chromadb.Collection, question: str, api_key: str = "", top_k: int = 5) -> list[dict]:
-    model = get_model()
-    query_embedding = model.encode([question])[0].tolist()
+    query_embedding = encode_query(question)
 
     results = col.query(
         query_embeddings=[query_embedding],

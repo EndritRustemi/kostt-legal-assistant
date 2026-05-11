@@ -1,11 +1,12 @@
 """
-indexer.py -- ChromaDB index builder for the Streamlit app.
+indexer.py -- Builds the in-memory VectorStore for the Streamlit app.
 
-Fingerprint-based cache: if the set of PDFs has not changed since the
-last build, the existing on-disk index is returned immediately.
+Memory-safe: each PDF is embedded and added individually so peak memory
+is bounded by a single document's chunks, not the whole corpus.
 
-Memory-safe: each PDF is processed and embedded independently so there
-is never a large all-text list in memory at once.
+The VectorStore is cached by @st.cache_resource in app.py and survives
+for the lifetime of the Streamlit process. Clearing the cache (e.g. via
+"Ri-indekso" button) triggers a full rebuild on next call.
 """
 
 from __future__ import annotations
@@ -15,9 +16,8 @@ import re
 from pathlib import Path
 from typing import Any
 
-import chromadb
-
 from rag.embedder import encode_passages, EMBED_MODEL
+from rag.vector_store import VectorStore
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
@@ -33,40 +33,10 @@ CATEGORIES: dict[str, str] = {
     "raportet":    "Raporte & Manuale",
 }
 
-_CHUNK_SIZE  = 800
-_CHUNK_OVER  = 100
-_CHROMA_DIR  = Path("/tmp/chroma_legal")
-_FP_FILE     = _CHROMA_DIR / "fingerprint.txt"
+_CHUNK_SIZE = 800
+_CHUNK_OVER = 100
 
-# ── Fingerprint ────────────────────────────────────────────────────────────────
-
-def _fingerprint(laws_dir: Path, extra_n: int = 0) -> str:
-    parts: list[str] = [f"model:{EMBED_MODEL}"]   # invalidate cache on model change
-    for cat_key in sorted(CATEGORIES):
-        folder = laws_dir / cat_key
-        if not folder.exists():
-            continue
-        for pdf in sorted(folder.glob("*.pdf")):
-            parts.append(f"{cat_key}/{pdf.name}:{pdf.stat().st_size}")
-    parts.append(f"web:{extra_n}")
-    return hashlib.md5("|".join(parts).encode()).hexdigest()[:12]
-
-
-def _try_load_existing(fp: str) -> chromadb.Collection | None:
-    if not _FP_FILE.exists():
-        return None
-    if _FP_FILE.read_text().strip() != fp:
-        return None
-    try:
-        client = chromadb.PersistentClient(path=str(_CHROMA_DIR))
-        col = client.get_collection("legal_docs")
-        if col.count() > 0:
-            return col
-    except Exception:
-        pass
-    return None
-
-# ── PDF extraction ─────────────────────────────────────────────────────────────
+# ── Helpers ─────────────────────────────────────────────────────────────────────
 
 def _extract_pdf_pages(path: Path) -> list[tuple[int, str]]:
     try:
@@ -100,8 +70,8 @@ def _split_text(text: str, size: int = _CHUNK_SIZE, overlap: int = _CHUNK_OVER) 
 
 
 def _chunk_id(source: str, page: int | str, idx: int) -> str:
-    raw = f"{source}|{page}|{idx}"
-    return hashlib.md5(raw.encode()).hexdigest()[:16]
+    return hashlib.md5(f"{source}|{page}|{idx}".encode()).hexdigest()[:16]
+
 
 # ── Public API ─────────────────────────────────────────────────────────────────
 
@@ -116,76 +86,54 @@ def count_pdfs(laws_dir: Path) -> dict[str, int]:
 def build_index(
     laws_dir: Path,
     extra_chunks: list[dict[str, Any]] | None = None,
-) -> chromadb.Collection:
+) -> VectorStore:
     """
-    Return a ChromaDB collection of all PDFs + optional web chunks.
-
-    Memory-safe: each PDF is embedded and added to ChromaDB individually
-    so peak memory is bounded by a single document, not the entire corpus.
+    Build an in-memory VectorStore from all PDFs + optional web chunks.
+    Each PDF is embedded individually to keep peak memory minimal.
     """
-    extra_chunks = extra_chunks or []
-    fp = _fingerprint(laws_dir, len(extra_chunks))
+    store = VectorStore()
 
-    cached = _try_load_existing(fp)
-    if cached is not None:
-        return cached
-
-    # ── Full rebuild ──────────────────────────────────────────────────────────
-    _CHROMA_DIR.mkdir(parents=True, exist_ok=True)
-
-    try:
-        client = chromadb.PersistentClient(path=str(_CHROMA_DIR))
-        client.delete_collection("legal_docs")
-    except Exception:
-        pass
-
-    client = chromadb.PersistentClient(path=str(_CHROMA_DIR))
-    col = client.get_or_create_collection(
-        "legal_docs",
-        metadata={"hnsw:space": "cosine"},
-    )
-
-    # ── PDFs — one at a time to keep peak memory low ──────────────────────────
+    # ── PDFs — one at a time ──────────────────────────────────────────────────
     for cat_key, cat_label in CATEGORIES.items():
         folder = laws_dir / cat_key
         if not folder.exists():
             continue
         for pdf_path in sorted(folder.glob("*.pdf")):
             source = pdf_path.stem
-            texts: list[str] = []
-            ids:   list[str] = []
-            metas: list[dict] = []
+            texts:  list[str]  = []
+            ids:    list[str]  = []
+            metas:  list[dict] = []
 
             for page_num, page_text in _extract_pdf_pages(pdf_path):
-                for idx, chunk_text in enumerate(_split_text(page_text)):
-                    texts.append(chunk_text)
+                for idx, chunk in enumerate(_split_text(page_text)):
+                    texts.append(chunk)
                     ids.append(_chunk_id(source, page_num, idx))
                     metas.append({
                         "source":   source,
                         "category": cat_label,
                         "page":     page_num,
-                        "snippet":  chunk_text[:120],
+                        "snippet":  chunk[:120],
                     })
 
             if not texts:
                 continue
 
             embeddings = encode_passages(texts, batch_size=32)
-
             batch = 100
             for i in range(0, len(texts), batch):
-                col.add(
+                store.add(
                     documents=texts[i : i + batch],
                     embeddings=embeddings[i : i + batch],
                     ids=ids[i : i + batch],
                     metadatas=metas[i : i + batch],
                 )
+
     # ── Web chunks ────────────────────────────────────────────────────────────
     if extra_chunks:
-        web_texts:  list[str] = []
-        web_ids:    list[str] = []
+        web_texts:  list[str]  = []
+        web_ids:    list[str]  = []
         web_metas:  list[dict] = []
-        for chunk in extra_chunks:
+        for chunk in (extra_chunks or []):
             text = chunk.get("text", "").strip()
             if not text:
                 continue
@@ -205,12 +153,11 @@ def build_index(
             embeddings = encode_passages(web_texts, batch_size=32)
             batch = 100
             for i in range(0, len(web_texts), batch):
-                col.add(
+                store.add(
                     documents=web_texts[i : i + batch],
                     embeddings=embeddings[i : i + batch],
                     ids=web_ids[i : i + batch],
                     metadatas=web_metas[i : i + batch],
                 )
 
-    _FP_FILE.write_text(fp)
-    return col
+    return store

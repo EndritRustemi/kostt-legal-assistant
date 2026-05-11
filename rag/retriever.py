@@ -1,17 +1,15 @@
-"""
-Kërkim vektorial: embedo pyetjen (lokal) → gjej chunks më të ngjashme
-"""
+"""Kërkim vektorial: embedo pyetjen → gjej chunks më të ngjashme."""
 
-import chromadb
 from rag.embedder import encode_query
+from rag.vector_store import VectorStore
 
 
-def retrieve(col: chromadb.Collection, question: str, api_key: str = "", top_k: int = 5) -> list[dict]:
+def retrieve(store: VectorStore, question: str, api_key: str = "", top_k: int = 5) -> list[dict]:
     query_embedding = encode_query(question)
 
-    results = col.query(
+    results = store.query(
         query_embeddings=[query_embedding],
-        n_results=min(top_k, col.count()),
+        n_results=min(top_k, store.count()),
         include=["documents", "metadatas", "distances"],
     )
 
@@ -22,12 +20,12 @@ def retrieve(col: chromadb.Collection, question: str, api_key: str = "", top_k: 
         results["distances"][0],
     ):
         chunks.append({
-            "text": doc,
-            "source": meta.get("source", ""),
+            "text":     doc,
+            "source":   meta.get("source", ""),
             "category": meta.get("category", ""),
-            "page": meta.get("page", 0),
-            "snippet": meta.get("snippet", doc[:120]),
-            "score": round(1 - dist, 3),
+            "page":     meta.get("page", 0),
+            "snippet":  meta.get("snippet", doc[:120]),
+            "score":    round(1 - dist, 3),
         })
 
     return chunks
